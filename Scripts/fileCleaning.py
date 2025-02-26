@@ -1,8 +1,6 @@
 import pandas as pd
-import glob
 import re
 from typing import List, Dict
-
 
 def clean_medicare_advantage_data(folder_path: str, file_paths: List[str]) -> Dict[str, pd.DataFrame]:
     """
@@ -17,90 +15,47 @@ def clean_medicare_advantage_data(folder_path: str, file_paths: List[str]) -> Di
         - 'measures': Detailed measure scores
         - 'domain_scores': Domain-level scores
     """
-    
-    all_contract_info = []
-    all_measures = []
-    all_domain_scores = []
-    
+    dfs = []
     for file_path in file_paths:
-        # Extract year from filename
         year_match = re.search(r'(\d{4})\s+Star\s+Ratings', file_path)
         if not year_match:
             raise ValueError(f"Could not extract year from filename: {file_path}")
         year = year_match.group(1)
-        
+        print(year)
         # Read the CSV file
-        df = pd.read_csv(folder_path + file_path, encoding='cp1252')
-        
-        # Get the base column name (first column) which contains the year
-        base_col = df.columns[0]
-        
-        # Rename unnamed columns to their index position
-        df.columns = [base_col] + [f'col_{i}' for i in range(1, len(df.columns))]
-        
-        # First few rows contain header information
-        # Find the row with CONTRACT_ID
-        contract_row_idx = df[df[base_col] == 'CONTRACT_ID'].index[0]
-        
-        # Use this row as headers and skip rows above it
-        headers = df.iloc[contract_row_idx]
-        df = df.iloc[contract_row_idx + 1:].reset_index(drop=True)
-        df.columns = headers
-        
-        # Basic contract information
-        contract_info = df[[
-            'CONTRACT_ID', 
-            'Organization Type',
-            'Contract Name',
-            'Organization Marketing Name',
-            'Parent Organization'
-        ]].copy()
-        contract_info['year'] = year
-        all_contract_info.append(contract_info)
-        
-        # Extract measure scores
-        # Measures are typically numeric values or start with numbers (like "4 out of 5 stars")
-        measure_cols = ['CONTRACT_ID'] + [
-            col for col in df.columns 
-            if any(char.isdigit() for char in str(df[col].iloc[0]))
-        ]
-        measures = df[measure_cols].copy()
-        measures['year'] = year
-        all_measures.append(measures)
-        
-        # Extract domain scores
-        domain_patterns = [
-            'HD1:', 'HD2:', 'HD3:', 'HD4:', 'HD5:',
-            'DD1:', 'DD2:', 'DD3:', 'DD4:'
-        ]
-        
-        domain_cols = ['CONTRACT_ID'] + [
-            col for col in df.columns 
-            if any(pattern in str(col) for pattern in domain_patterns)
-        ]
-        
-        domain_scores = df[domain_cols].copy()
-        domain_scores['year'] = year
-        all_domain_scores.append(domain_scores)
+        df = pd.read_csv(folder_path + file_path, encoding='cp1252', skiprows=2)
+
+        df = df.iloc[1:,:]
+
+        # Drop columns that start with 'D'
+        df = df.loc[:, ~df.columns.str.startswith('D')]
+
+        # Add first 4 column names: CONTRACT_ID	Organization Type	Contract Name	Organization Marketing Name	Parent Organization
+        df.columns = ["CONTRACT_ID", "Organization Type", "Contract Name", "Organization Marketing Name", "Parent Organization"] + list(df.columns[5:])
+
+        # Remove the 'C\d{2}: ' prefix from the column names
+        df.columns = [re.sub(r'^C\d{2}: ', 'C: ', col) for col in df.columns]
+
+        # Remove the % sign from all columns
+        df = df.replace('\%', '', regex=True)
+
+        # For columns starting with 'C:', convert all non-numberic values to NaN
+        df.loc[:, df.columns.str.startswith('C:')] = df.loc[:, df.columns.str.startswith('C:')].apply(pd.to_numeric, errors='coerce')
+
+        # Add a column for the year
+        df['Year'] = year
+
+        dfs.append(df)
+
+    df = pd.concat(dfs, ignore_index=True, axis=0)
+
+    # sort by plan then year
+    df = df.sort_values(['CONTRACT_ID', 'Year'])
+    df.loc[df[ 'C: Controlling Blood Pressure'].isna(), 'C: Controlling Blood Pressure'] = df['C: Controlling High Blood Pressure']
+    df.drop(columns=['C: Controlling High Blood Pressure'], inplace=True)
+
     
-    # Combine data from all years
-    combined_data = {
-        'contract_info': pd.concat(all_contract_info, ignore_index=True),
-        'measures': pd.concat(all_measures, ignore_index=True),
-        'domain_scores': pd.concat(all_domain_scores, ignore_index=True)
-    }
-    
-    # Clean up the data
-    for key in combined_data:
-        df = combined_data[key]
-        # Convert year to integer
-        df['year'] = df['year'].astype(int)
-        # Remove leading/trailing whitespace
-        for col in df.columns:
-            if df[col].dtype == 'object':
-                df[col] = df[col].str.strip()
-    
-    return combined_data
+    return df
 
 def extract_star_rating(value: str) -> float:
     """
@@ -118,61 +73,51 @@ def extract_star_rating(value: str) -> float:
         return float(match.group(1))
     return None
 
-def calculate_yoy_changes(data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
-    """
-    Calculate year-over-year changes for measures and domain scores.
-    
-    Args:
-        data: Dictionary containing cleaned DataFrames
-        
-    Returns:
-        Dictionary containing DataFrames with YoY changes
-    """
-    yoy_changes = {}
-    
-    for key in ['measures', 'domain_scores']:
-        df = data[key].copy()
-        
-        # Convert star ratings to numeric values
-        numeric_cols = [col for col in df.columns if col not in ['CONTRACT_ID', 'year']]
-        for col in numeric_cols:
-            df[col] = df[col].apply(extract_star_rating)
-        
-        # Calculate YoY changes
-        df_sorted = df.sort_values(['CONTRACT_ID', 'year'])
-        
-        # Calculate differences
-        yoy_diff = df_sorted.groupby('CONTRACT_ID').diff()
-        
-        # Add year and CONTRACT_ID back
-        yoy_diff['year'] = df_sorted['year']
-        yoy_diff['CONTRACT_ID'] = df_sorted['CONTRACT_ID']
-        
-        # Remove rows where we don't have previous year data
-        yoy_diff = yoy_diff.dropna(subset=['year'])
-        
-        yoy_changes[key] = yoy_diff
-    
-    return yoy_changes
+def prep_for_beta_regression(df):
 
-# Example usage:
-if __name__ == "__main__":
-    # List of file paths
-    folder = "Data/Measure Data/"
-    files = [
-        "2023 Star Ratings Measure Data.csv",
-        "2024 Star Ratings Measure Data.csv"
-    ]
+    lag_1 = df[['CONTRACT_ID'] + list(measures_2025.keys())].groupby('CONTRACT_ID').shift(1).rename(columns={col: col + '_lag1' for col in measures_2025.keys()})
+    diff_1 = df[['CONTRACT_ID'] + list(measures_2025.keys())].groupby('CONTRACT_ID').diff(1).rename(columns={col: col + '_diff1' for col in measures_2025.keys()})
+    diff_2 = df[['CONTRACT_ID'] + list(measures_2025.keys())].groupby('CONTRACT_ID').diff(2).rename(columns={col: col + '_diff2' for col in measures_2025.keys()})
+    # join on index
+    df = pd.concat([df, lag_1, diff_1, diff_2], axis=1)
+    # For columns with diff1, diff2, or _lag1, create a new column that is an indicator for whether that value is missing
+    diff_1_cols = [col for col in df.columns if '_diff1' in col]
+    diff_2_cols = [col for col in df.columns if '_diff2' in col]
+    lag_1_cols = [col for col in df.columns if '_lag1' in col]
+
+    for col in diff_1_cols + diff_2_cols + lag_1_cols:
+        df[col + '_missing'] = df[col].isna().astype(int)
+    # Replace NaNs with 0 for lag1, diff1, and diff2 columns
+    df[diff_1.columns] = df[diff_1.columns].fillna(0)
+    df[diff_2.columns] = df[diff_2.columns].fillna(0)
+    df[lag_1.columns] = df[lag_1.columns].fillna(0)
+
+    featureCols = list(diff_1.columns) + list(diff_2.columns) + list(lag_1.columns) + [col for col in df.columns if '_missing' in col] 
+
+    return df, featureCols
+
+def beta_regression(df, targetCol, featureCols):
+    from statsmodels.othermod.betareg import BetaModel
+
+    regDf = df.dropna(subset=[targetCol], axis=0)[[targetCol] + featureCols]
+
+    precision_cols = [col for col in featureCols if targetCol in col]
+
+    betaResult = BetaModel(regDf[targetCol].apply(lambda x: (x / 100)-.0001),
+                            regDf.drop(columns=[targetCol]),
+                            exog_precision=regDf[precision_cols]
+                        ).fit()
+    return betaResult
+
+def get_beta_regression_distribution(betaResult, df, targetCol, featureCols, index):
+    regDf = df.dropna(subset=[targetCol], axis=0)[[targetCol] + featureCols]
+    precision_cols = [col for col in featureCols if targetCol in col]
+
+    distribution = betaResult.get_distribution(
+                            exog=df.drop(columns=[targetCol]).iloc[index], 
+                           exog_precision=regDf[precision_cols].iloc[index])
     
-    # Clean the data
-    cleaned_data = clean_medicare_advantage_data(folder, files)
+    return distribution.rvs(1638) # I think this number of unique plans. Have to check. Might be the number of obs in the regression - slightly different w NA values
+
+
     
-    # Calculate YoY changes
-    yoy_changes = calculate_yoy_changes(cleaned_data)
-    
-    # Example: Print summary statistics
-    for key in cleaned_data:
-        print(f"\nSummary for {key}:")
-        print(f"Number of records: {len(cleaned_data[key])}")
-        print(f"Number of unique contracts: {cleaned_data[key]['CONTRACT_ID'].nunique()}")
-        print(f"Years covered: {sorted(cleaned_data[key]['year'].unique())}")
