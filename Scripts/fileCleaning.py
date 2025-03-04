@@ -1,6 +1,8 @@
 import pandas as pd
 import re
 from typing import List, Dict
+from HelperObjects.measureWeights import measures_2025
+
 
 def clean_medicare_advantage_data(folder_path: str, file_paths: List[str]) -> Dict[str, pd.DataFrame]:
     """
@@ -54,6 +56,10 @@ def clean_medicare_advantage_data(folder_path: str, file_paths: List[str]) -> Di
     df.loc[df[ 'C: Controlling Blood Pressure'].isna(), 'C: Controlling Blood Pressure'] = df['C: Controlling High Blood Pressure']
     df.drop(columns=['C: Controlling High Blood Pressure'], inplace=True)
 
+    # trim whitespace from CONTRACT_ID
+    df['CONTRACT_ID'] = df['CONTRACT_ID'].str.strip()
+
+    df['Year'] = df['Year'].astype(int)
     
     return df
 
